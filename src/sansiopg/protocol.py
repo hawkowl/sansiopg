@@ -111,6 +111,15 @@ def _text_text_from_postgres(val):
     return val.decode("utf8")
 
 
+def _bool_text_from_postgres(val):
+    if val == b"t":
+        return True
+    elif val == b"f":
+        return False
+    else:
+        raise ValueError()
+
+
 class PostgresConnection(object):
     def __init__(self):
         self._converters = {
@@ -118,6 +127,7 @@ class PostgresConnection(object):
             str: _str_to_postgres,
             (DataType.NAME, FormatType.TEXT): _text_text_from_postgres,
             (DataType.TEXT, FormatType.TEXT): _text_text_from_postgres,
+            (DataType.BOOL, FormatType.TEXT): _bool_text_from_postgres,
         }
 
     def convertToPostgres(self, value):
@@ -136,7 +146,9 @@ class PostgresConnection(object):
             return conv(value)
         except:
             print("Can't convert ", value, row_format)
-            raise ValueError()
+            print("Falling back to text decode")
+            if row_format.format_code == FormatType.TEXT:
+                return value.decode("utf8")
 
     def connect(self, endpoint, username):
 
@@ -222,7 +234,6 @@ class PostgresConnection(object):
         if self._state == NotARealStateMachine.WAITING_FOR_READY:
             if isinstance(message, ReadyForQuery):
                 self._state = NotARealStateMachine.READY
-
                 self._waiting, waiting = None, self._waiting
                 waiting.callback(True)
             elif isinstance(message, ParameterStatus):
@@ -292,12 +303,8 @@ if __name__ == "__main__":
 
         r = await conn.connect(e, "hawkowl")
 
-        print(r)
-        resp = await conn.extQuery(
-            "SELECT usename FROM pg_user WHERE usename = $1", ("hawkowl",)
-        )
+        resp = await conn.extQuery("SELECT * FROM pg_user", tuple())
 
-        print("Got return!")
-        print(resp)
+        print("Result:", resp)
 
     react(lambda r: defer.ensureDeferred(main(r)))

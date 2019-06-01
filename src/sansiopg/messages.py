@@ -10,9 +10,13 @@ class FormatType(Enum):
 
 
 class DataType(Enum):
+    BOOL = 16
     NAME = 19
     INT4 = 23
     TEXT = 25
+    OID = 26
+    ABSTIME = 702
+    _TEXT = 1009
 
 
 @attr.s
@@ -234,6 +238,7 @@ class DataRow(object):
             length_of_next, = struct.unpack("!i", content[0:4])
             col_val = content[4 : length_of_next + 4]
             vals.append(col_val)
+            content = content[length_of_next + 4 :]
 
         return cls(values=tuple(vals))
 
