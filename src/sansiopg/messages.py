@@ -38,6 +38,7 @@ class StartupMessage(object):
         msg = b"".join(res)
         return struct.pack("!i", len(msg) + 4) + msg
 
+
 @attr.s
 class ReadyForQuery(object):
     backend_status = attr.ib()
@@ -47,6 +48,7 @@ class ReadyForQuery(object):
         backend_status = buf[5:]
 
         return cls(backend_status=backend_status)
+
 
 @attr.s
 class Query(object):
@@ -82,6 +84,14 @@ class Parse(object):
         msg = b"".join(res)
         return b"P" + struct.pack("!i", len(msg) + 4) + msg
 
+
+@attr.s
+class ParseComplete(object):
+    @classmethod
+    def deser(cls, buf):
+        return cls()
+
+
 @attr.s
 class Describe(object):
 
@@ -89,14 +99,11 @@ class Describe(object):
 
     def ser(self):
 
-        res = [
-            b"S",
-            self.prepared_statement_name.encode("utf8"),
-            b"\0",
-        ]
+        res = [b"S", self.prepared_statement_name.encode("utf8"), b"\0"]
 
         msg = b"".join(res)
         return b"D" + struct.pack("!i", len(msg) + 4) + msg
+
 
 @attr.s
 class BindParam(object):
@@ -113,17 +120,16 @@ class Bind(object):
     parameters = attr.ib()
     result_format_codes = attr.ib()
 
-
     def ser(self):
 
         res = []
 
-        res.append(self.destination_portal.encode('utf8'))
+        res.append(self.destination_portal.encode("utf8"))
         res.append(b"\0")
-        res.append(self.prepared_statement.encode('utf8'))
+        res.append(self.prepared_statement.encode("utf8"))
         res.append(b"\0")
 
-        # No result format codes
+        # No input format codes
         res.append(struct.pack("!h", 0))
 
         res.append(struct.pack("!h", len(self.parameters)))
@@ -135,9 +141,37 @@ class Bind(object):
         # No result format codes
         res.append(struct.pack("!h", 0))
 
-
         msg = b"".join(res)
         return b"B" + struct.pack("!i", len(msg) + 4) + msg
+
+
+@attr.s
+class BindComplete(object):
+    @classmethod
+    def deser(cls, buf):
+        return cls()
+
+
+@attr.s
+class Sync(object):
+    def ser(self):
+        return b"S" + struct.pack("!i", 4)
+
+
+@attr.s
+class Execute(object):
+
+    portal_name = attr.ib()
+    rows_to_return = attr.ib()
+
+    def ser(self):
+
+        res = [self.portal_name.encode("utf8"), b"\0"]
+
+        res.append(struct.pack("!i", self.rows_to_return))
+
+        msg = b"".join(res)
+        return b"E" + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -164,8 +198,6 @@ class RowDescription(object):
         for x in range(col_values):
 
             field_name, rest = content.split(b"\0", 1)
-
-            print(field_name)
 
             table_obj_id, col_attr_num, data_type, data_type_size, type_modifier, format_code = struct.unpack(
                 "!ihihih", rest[:18]
@@ -250,10 +282,12 @@ class BackendKeyData(object):
         proc_id, secret_key = struct.unpack("!ii", buf[5:])
         return cls(process_id=proc_id, secret_key=secret_key)
 
+
 @attr.s
 class ErrorField(object):
     error_type = attr.ib()
     error_text = attr.ib()
+
 
 @attr.s
 class Error(object):
@@ -277,6 +311,7 @@ class Error(object):
             fields.append(ErrorField(error_type=field_type, error_text=msg))
 
         return cls(fields=fields)
+
 
 @attr.s
 class Notice(object):
@@ -302,11 +337,12 @@ class Notice(object):
 
         return cls(fields=fields)
 
+
 @attr.s
 class Flush(object):
-
     def ser(self):
         return b"H" + struct.pack("!i", 4)
+
 
 @attr.s
 class Unknown(object):
@@ -352,6 +388,10 @@ def parse_from_buffer(buf):
         msg = Error
     elif msg_type == b"N":
         msg = Notice
+    elif msg_type == b"1":
+        msg = ParseComplete
+    elif msg_type == b"2":
+        msg = BindComplete
     else:
         msg = Unknown
 

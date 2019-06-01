@@ -2,48 +2,33 @@ import attr
 from twisted.internet.protocol import Protocol
 from twisted.internet import defer
 
+from enum import Enum
 import struct
 from .messages import (
     StartupMessage,
-    parse_from_buffer,
+    FormatType,
+    DataType,
     AuthenticationOk,
     Query,
     BackendKeyData,
+    BindParam,
+    Execute,
     DataRow,
+    Sync,
     CommandComplete,
-    Parse, ParameterStatus, Bind, ReadyForQuery, Describe, Notice, Error, Flush
+    RowDescription,
+    Parse,
+    ParameterStatus,
+    Bind,
+    ReadyForQuery,
+    Describe,
+    Notice,
+    Error,
+    Flush,
+    ParseComplete,
+    BindComplete,
 )
-
-
-@attr.s
-class ParserFeed(object):
-
-    _buffer = attr.ib(default=b"")
-
-    def feed(self, input):
-
-        self._buffer += input
-
-        messages = []
-
-        while True:
-            if len(self._buffer) < 5:
-                # We can't even get the message, so, return
-                return messages
-
-            # Get the length of the message
-            msg_len, = struct.unpack("!i", self._buffer[1:5])
-
-            # Check if we have the whole message
-            if len(self._buffer) < msg_len + 1:
-                print("Dont have for", self._buffer)
-                return messages
-
-            # If we do, split it up
-            msg = self._buffer[0 : msg_len + 1]
-            self._buffer = self._buffer[msg_len + 1 :]
-
-            messages.append(parse_from_buffer(msg))
+from .parser import ParserFeed
 
 
 @attr.s
@@ -54,7 +39,7 @@ class PostgreSQLClientProtocol(Protocol):
     _parser = attr.ib(factory=ParserFeed)
 
     def send(self, msg):
-        print(">>> " + repr(msg.ser()))
+        print(">>> " + repr(msg))
         self.transport.write(msg.ser())
 
     def connectionMade(self):
@@ -63,11 +48,10 @@ class PostgreSQLClientProtocol(Protocol):
         self.send(s)
 
     def dataReceived(self, data):
-        print("<<< " + repr(data))
-
         messages = self._parser.feed(data)
 
         for i in messages:
+            print("<<< " + repr(i))
             self._on_message(i)
 
     def sendQuery(self, query):
@@ -77,46 +61,135 @@ class PostgreSQLClientProtocol(Protocol):
     def sendParse(self, query, name=""):
         p = Parse(name, query)
         self.send(p)
+        self.flush()
 
+    def sendDescribe(self, name=""):
+        d = Describe("")
+        self.send(d)
+        self.flush()
+
+    def sendBind(self, bind):
+        b = Bind("", "", bind, None)
+        self.send(b)
+        self.flush()
+
+    def flush(self):
         f = Flush()
         self.send(f)
 
-    def sendBind(self, bind):
-        b = Bind("", "test", bind, None)
-        self.send(b)
+    def sendSync(self):
+        s = Sync()
+        self.send(s)
+
+    def sendExecute(self, portal, rows_to_return=0):
+        e = Execute(portal, rows_to_return)
+        self.send(e)
+        self.flush()
+
+
+class NotARealStateMachine(Enum):
+
+    DISCONNECTED = 0
+    WAITING_FOR_READY = 1
+    WAITING_FOR_PARSE = 2
+    WAITING_FOR_DESCRIBE = 7
+    WAITING_FOR_BIND = 3
+    READY = 4
+    NEEDS_AUTH = 5
+    WAITING_FOR_QUERY_COMPLETE = 6
+
+
+def _int_to_postgres(val):
+    return BindParam(0, str(val).encode("utf8"))
+
+
+def _str_to_postgres(val):
+    return BindParam(0, val.encode("utf8"))
+
+
+def _text_text_from_postgres(val):
+    return val.decode("utf8")
+
 
 class PostgresConnection(object):
+    def __init__(self):
+        self._converters = {
+            int: _int_to_postgres,
+            str: _str_to_postgres,
+            (DataType.NAME, FormatType.TEXT): _text_text_from_postgres,
+            (DataType.TEXT, FormatType.TEXT): _text_text_from_postgres,
+        }
+
+    def convertToPostgres(self, value):
+
+        try:
+            conv = self._converters.get(type(value))
+            return conv(value)
+        except:
+            print("Can't convert ", value)
+            raise ValueError()
+
+    def convertFromPostgres(self, value, row_format):
+
+        try:
+            conv = self._converters.get((row_format.data_type, row_format.format_code))
+            return conv(value)
+        except:
+            print("Can't convert ", value, row_format)
+            raise ValueError()
+
     def connect(self, endpoint, username):
 
-        self._queryDeferred = None
+        self._state = NotARealStateMachine.WAITING_FOR_READY
+        self._waiting = None
 
         self._pg = PostgreSQLClientProtocol(username, self._onMessage)
 
-        self._connectedDeferred = defer.Deferred()
+        self._waiting = defer.Deferred()
 
         cf = Factory.forProtocol(lambda: self._pg)
         endpoint.connect(cf)
 
-        return self._connectedDeferred
-
-    def query(self, query):
-        self._pg.sendQuery(query)
-
-        self._dataRows = []
-        self._queryDeferred = defer.Deferred()
-        return self._queryDeferred
+        return self._waiting
 
     async def extQuery(self, query, vals):
 
-        self._parsedDeferred = defer.Deferred()
+        self._dataRows = []
+        self._desc = None
+
+        self._waiting = defer.Deferred()
+        self._state = NotARealStateMachine.WAITING_FOR_PARSE
         self._pg.sendParse(query)
 
-        await self._parsedDeferred
+        await self._waiting
 
-        self._bindDeferred = defer.Deferred()
-        self._pg.sendBind(vals)
+        self._waiting = defer.Deferred()
+        self._state = NotARealStateMachine.WAITING_FOR_DESCRIBE
+        self._pg.sendDescribe()
 
-        await self._bindDeferred
+        await self._waiting
+
+        bind_vals = [self.convertToPostgres(x) for x in vals]
+
+        self._waiting = defer.Deferred()
+        self._state = NotARealStateMachine.WAITING_FOR_BIND
+        self._pg.sendBind(bind_vals)
+
+        await self._waiting
+
+        self._waiting = defer.Deferred()
+        self._state = NotARealStateMachine.WAITING_FOR_QUERY_COMPLETE
+        self._pg.sendExecute("")
+
+        await self._waiting
+
+        self._waiting = defer.Deferred()
+        self._state = NotARealStateMachine.WAITING_FOR_READY
+        self._pg.sendSync()
+
+        await self._waiting
+
+        return self._collate()
 
     def _addDataRow(self, msg):
         self._dataRows.append(msg.values)
@@ -125,30 +198,85 @@ class PostgresConnection(object):
         """
         Collate the responses of a query.
         """
-        return self._dataRows
+
+        resp = []
+
+        for i in self._dataRows:
+            row = []
+            for x, form in zip(i, self._desc.values):
+                row.append(self.convertFromPostgres(x, form))
+            resp.append(row)
+
+        return resp
 
     def _onMessage(self, message):
 
-        if isinstance(message, ReadyForQuery) and self._connectedDeferred:
-            self._connectedDeferred.callback(True)
-            self._connectedDeferred = None
+        # These can come at any time
+        if isinstance(message, Notice):
             return
-        elif isinstance(message, ParameterStatus):
-            pass
-        elif isinstance(message, DataRow):
-            self._addDataRow(message)
-
-        elif isinstance(message, CommandComplete):
-            self._queryDeferred.callback(self._collate())
-
-        elif isinstance(message, Notice):
-            pass
         elif isinstance(message, Error):
             print(message)
             self._pg.transport.loseConnection()
+            return
+
+        if self._state == NotARealStateMachine.WAITING_FOR_READY:
+            if isinstance(message, ReadyForQuery):
+                self._state = NotARealStateMachine.READY
+
+                self._waiting, waiting = None, self._waiting
+                waiting.callback(True)
+            elif isinstance(message, ParameterStatus):
+                # Don't care
+                pass
+            elif isinstance(message, AuthenticationOk):
+                # Don't care
+                pass
+            elif isinstance(message, BackendKeyData):
+                # Don't care
+                pass
+            else:
+                print("Do not understand!")
+                print(message)
+
+        elif self._state == NotARealStateMachine.WAITING_FOR_PARSE:
+            if isinstance(message, ParseComplete):
+                self._state = NotARealStateMachine.READY
+                self._waiting, waiting = None, self._waiting
+                waiting.callback(True)
+            else:
+                print("Do not understand!")
+                print(message)
+
+        elif self._state == NotARealStateMachine.WAITING_FOR_DESCRIBE:
+            if isinstance(message, RowDescription):
+                self._desc = message
+                self._state = NotARealStateMachine.READY
+                self._waiting, waiting = None, self._waiting
+                waiting.callback(True)
+
+        elif self._state == NotARealStateMachine.WAITING_FOR_BIND:
+            if isinstance(message, BindComplete):
+                self._state = NotARealStateMachine.READY
+                self._waiting, waiting = None, self._waiting
+                waiting.callback(True)
+            else:
+                print("Do not understand!")
+                print(message)
+
+        elif self._state == NotARealStateMachine.WAITING_FOR_QUERY_COMPLETE:
+            if isinstance(message, CommandComplete):
+                self._state = NotARealStateMachine.WAITING_FOR_READY
+                self._waiting, waiting = None, self._waiting
+                waiting.callback(True)
+            elif isinstance(message, DataRow):
+                self._addDataRow(message)
+            else:
+                print("Do not understand!")
+                print(message)
 
         else:
-            print("Not handling", message)
+            print("current state", self._state)
+            print("message", message)
 
 
 if __name__ == "__main__":
@@ -162,9 +290,12 @@ if __name__ == "__main__":
         e = endpoints.HostnameEndpoint(reactor, "localhost", 5432)
         conn = PostgresConnection()
 
-        await conn.connect(e, "hawkowl")
+        r = await conn.connect(e, "hawkowl")
 
-        resp = await conn.extQuery("SELECT usename FROM pg_user WHERE usename = $1", tuple(b'4'))
+        print(r)
+        resp = await conn.extQuery(
+            "SELECT usename FROM pg_user WHERE usename = $1", ("hawkowl",)
+        )
 
         print("Got return!")
         print(resp)
