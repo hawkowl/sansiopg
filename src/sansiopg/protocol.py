@@ -145,8 +145,8 @@ class PostgresConnection(object):
             conv = self._converters.get((row_format.data_type, row_format.format_code))
             return conv(value)
         except:
-            print("Can't convert ", value, row_format)
-            print("Falling back to text decode")
+            #print("Can't convert ", value, row_format)
+            #print("Falling back to text decode")
             if row_format.format_code == FormatType.TEXT:
                 return value.decode("utf8")
 
