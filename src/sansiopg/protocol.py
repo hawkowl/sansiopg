@@ -1,6 +1,7 @@
 import attr
 from twisted.internet.protocol import Protocol
 from twisted.internet import defer
+from collections import namedtuple
 
 from enum import Enum
 import struct
@@ -145,8 +146,8 @@ class PostgresConnection(object):
             conv = self._converters.get((row_format.data_type, row_format.format_code))
             return conv(value)
         except:
-            #print("Can't convert ", value, row_format)
-            #print("Falling back to text decode")
+            # print("Can't convert ", value, row_format)
+            # print("Falling back to text decode")
             if row_format.format_code == FormatType.TEXT:
                 return value.decode("utf8")
 
@@ -211,13 +212,15 @@ class PostgresConnection(object):
         Collate the responses of a query.
         """
 
+        res = namedtuple("Result", [x.field_name.decode('utf8') for x in self._desc.values])
+
         resp = []
 
         for i in self._dataRows:
             row = []
             for x, form in zip(i, self._desc.values):
                 row.append(self.convertFromPostgres(x, form))
-            resp.append(row)
+            resp.append(res(*row))
 
         return resp
 
