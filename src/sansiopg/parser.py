@@ -21,7 +21,7 @@ class ParserFeed(object):
                 return messages
 
             # Get the length of the message
-            msg_len, = struct.unpack("!i", self._buffer[1:5])
+            (msg_len,) = struct.unpack("!i", self._buffer[1:5])
 
             # Check if we have the whole message
             if len(self._buffer) < msg_len + 1:

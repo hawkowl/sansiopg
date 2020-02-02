@@ -19,6 +19,38 @@ class DataType(Enum):
     _TEXT = 1009
 
 
+class FrontendMessageType(Enum):
+    BIND = b"B"
+    DESCRIBE = b"D"
+    EXECUTE = b"E"
+    FLUSH = b"H"
+    PARSE = b"P"
+    SYNC = b"S"
+    QUERY = b"Q"
+    UNKNOWN = None
+
+    def _missing_(self, value):
+        return self.UNKNOWN
+
+
+class BackendMessageType(Enum):
+    COMMAND_COMPLETE = b"C"
+    DATA_ROW = b"D"
+    ERROR = b"E"
+    BACKEND_KEY_DATA = b"K"
+    NOTICE = b"N"
+    AUTHENTICATION_REQUEST = b"R"
+    PARAMETER_STATUS = b"S"
+    ROW_DESCRIPTION = b"T"
+    READY_FOR_QUERY = b"Z"
+    PARSE_COMPLETE = b"1"
+    BIND_COMPLETE = b"2"
+    UNKNOWN = None
+
+    def _missing_(self, value):
+        return self.UNKNOWN
+
+
 @attr.s
 class StartupMessage(object):
 
@@ -64,7 +96,7 @@ class Query(object):
         res = [self.query.encode("utf8"), b"\0"]
 
         msg = b"".join(res)
-        return b"Q" + struct.pack("!i", len(msg) + 4) + msg
+        return MessageType.QUERY + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -86,7 +118,7 @@ class Parse(object):
         res.append(struct.pack("!h", 0))
 
         msg = b"".join(res)
-        return b"P" + struct.pack("!i", len(msg) + 4) + msg
+        return FrontendMessageType.PARSE + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -106,7 +138,7 @@ class Describe(object):
         res = [b"S", self.prepared_statement_name.encode("utf8"), b"\0"]
 
         msg = b"".join(res)
-        return b"D" + struct.pack("!i", len(msg) + 4) + msg
+        return MessageType.DESCRIBE + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -146,7 +178,7 @@ class Bind(object):
         res.append(struct.pack("!h", 0))
 
         msg = b"".join(res)
-        return b"B" + struct.pack("!i", len(msg) + 4) + msg
+        return FrontendMessageType.BIND + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -159,7 +191,7 @@ class BindComplete(object):
 @attr.s
 class Sync(object):
     def ser(self):
-        return b"S" + struct.pack("!i", 4)
+        return FrontendMessageType.SYNC + struct.pack("!i", 4)
 
 
 @attr.s
@@ -175,7 +207,7 @@ class Execute(object):
         res.append(struct.pack("!i", self.rows_to_return))
 
         msg = b"".join(res)
-        return b"E" + struct.pack("!i", len(msg) + 4) + msg
+        return FrontendMessageType.EXECUTE + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -194,7 +226,7 @@ class RowDescription(object):
     @classmethod
     def deser(cls, buf):
 
-        col_values, = struct.unpack("!h", buf[5:7])
+        (col_values,) = struct.unpack("!h", buf[5:7])
         content = buf[7:]
 
         vals = []
@@ -203,9 +235,14 @@ class RowDescription(object):
 
             field_name, rest = content.split(b"\0", 1)
 
-            table_obj_id, col_attr_num, data_type, data_type_size, type_modifier, format_code = struct.unpack(
-                "!ihihih", rest[:18]
-            )
+            (
+                table_obj_id,
+                col_attr_num,
+                data_type,
+                data_type_size,
+                type_modifier,
+                format_code,
+            ) = struct.unpack("!ihihih", rest[:18])
 
             content = rest[18:]
 
@@ -229,13 +266,13 @@ class DataRow(object):
     @classmethod
     def deser(cls, buf):
 
-        col_values, = struct.unpack("!h", buf[5:7])
+        (col_values,) = struct.unpack("!h", buf[5:7])
         content = buf[7:]
 
         vals = []
 
         for x in range(col_values):
-            length_of_next, = struct.unpack("!i", content[0:4])
+            (length_of_next,) = struct.unpack("!i", content[0:4])
             col_val = content[4 : length_of_next + 4]
             vals.append(col_val)
             content = content[length_of_next + 4 :]
@@ -346,7 +383,7 @@ class Notice(object):
 @attr.s
 class Flush(object):
     def ser(self):
-        return b"H" + struct.pack("!i", 4)
+        return FrontendMessageType.FLUSH + struct.pack("!i", 4)
 
 
 @attr.s
@@ -362,42 +399,36 @@ class Unknown(object):
         return self(buf)
 
 
-def _parse_authentication_object(buf):
+@attr.s
+class AuthenticationRequest(object):
+    @classmethod
+    def deser(cls, buf):
+        (typ,) = struct.unpack("!i", buf[5:9])
 
-    typ, = struct.unpack("!i", buf[5:9])
+        if typ == 0:
+            return AuthenticationOk()
 
-    if typ == 0:
-        return AuthenticationOk()
     print(typ)
+
+
+class Parser(Enum):
+
+    BackendMessageType.COMMAND_COMPLETE = CommandComplete
+    BackendMessageType.DATA_ROW = DataRow
+    BackendMessageType.ERROR = Error
+    BackendMessageType.BACKEND_KEY_DATA = BackendKeyData
+    BackendMessageType.NOTICE = Notice
+    BackendMessageType.AUTHENTICATION_REQUEST = AuthenticationRequest
+    BackendMessageType.PARAMETER_STATUS = ParameterStatus
+    BackendMessageType.ROW_DESCRIPTION = RowDescription
+    BackendMessageType.READY_FOR_QUERY = ReadyForQuery
+    BackendMessageType.PARSE_COMPLETE = ParseComplete
+    BackendMessageType.BIND_COMPLETE = BindComplete
+    BackendMessageType.UNKNOWN = Unknown
 
 
 def parse_from_buffer(buf):
 
-    msg_type = buf[0:1]
-
-    if msg_type == b"R":
-        return _parse_authentication_object(buf)
-    elif msg_type == b"S":
-        msg = ParameterStatus
-    elif msg_type == b"D":
-        msg = DataRow
-    elif msg_type == b"C":
-        msg = CommandComplete
-    elif msg_type == b"K":
-        msg = BackendKeyData
-    elif msg_type == b"T":
-        msg = RowDescription
-    elif msg_type == b"Z":
-        msg = ReadyForQuery
-    elif msg_type == b"E":
-        msg = Error
-    elif msg_type == b"N":
-        msg = Notice
-    elif msg_type == b"1":
-        msg = ParseComplete
-    elif msg_type == b"2":
-        msg = BindComplete
-    else:
-        msg = Unknown
-
-    return msg.deser(buf)
+    msg_type = BackendMessageType[buf[0:1]]
+    parser = Parser[msg_type]
+    return parser.deser(buf)

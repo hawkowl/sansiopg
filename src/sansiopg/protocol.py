@@ -216,7 +216,9 @@ class PostgresConnection(object):
         Collate the responses of a query.
         """
 
-        res = namedtuple("Result", [x.field_name.decode('utf8') for x in self._desc.values])
+        res = namedtuple(
+            "Result", [x.field_name.decode("utf8") for x in self._desc.values]
+        )
 
         resp = []
 
