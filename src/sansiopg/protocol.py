@@ -152,6 +152,7 @@ class PostgresConnection(object):
                 return value.decode("utf8")
 
     def connect(self, endpoint, username):
+        from twisted.internet.protocol import Factory
 
         self._state = NotARealStateMachine.WAITING_FOR_READY
         self._waiting = None
@@ -161,7 +162,10 @@ class PostgresConnection(object):
         self._waiting = defer.Deferred()
 
         cf = Factory.forProtocol(lambda: self._pg)
-        endpoint.connect(cf)
+
+        d = endpoint.connect(cf)
+        d.errback(print)
+        d.errback(self._waiting.callback)
 
         return self._waiting
 
@@ -291,23 +295,3 @@ class PostgresConnection(object):
         else:
             print("current state", self._state)
             print("message", message)
-
-
-if __name__ == "__main__":
-
-    from twisted.internet import endpoints, reactor
-    from twisted.internet.protocol import Factory
-    from twisted.internet.task import react
-
-    async def main(reactor):
-
-        e = endpoints.HostnameEndpoint(reactor, "localhost", 5432)
-        conn = PostgresConnection()
-
-        r = await conn.connect(e, "hawkowl")
-
-        resp = await conn.extQuery("SELECT * FROM pg_user", tuple())
-
-        print("Result:", resp)
-
-    react(lambda r: defer.ensureDeferred(main(r)))
