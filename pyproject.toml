@@ -1,0 +1,12 @@
+[tool.poetry]
+name = "sansiopg"
+version = "19.9"
+description = "sans i/o postgres"
+
+authors = ["Amber Brown"]
+
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.6"  # Compatible python versions must be declared here
+attrs = "^19.1.0"
