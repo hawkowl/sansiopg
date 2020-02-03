@@ -22,6 +22,7 @@ class DataType(Enum):
 
 class FrontendMessageType(Enum):
     BIND = b"B"
+    CLOSE = b"C"
     DESCRIBE = b"D"
     EXECUTE = b"E"
     FLUSH = b"H"
@@ -54,8 +55,10 @@ class BackendMessageType(Enum):
     ROW_DESCRIPTION = b"T"
     PARAMETER_DESCRIPTION = b"t"
     READY_FOR_QUERY = b"Z"
+    NO_DATA = b"n"
     PARSE_COMPLETE = b"1"
     BIND_COMPLETE = b"2"
+    CLOSE_COMPLETE = b"3"
     UNKNOWN = None
 
     def _missing_(value):
@@ -65,6 +68,7 @@ class BackendMessageType(Enum):
 @attr.s
 class StartupMessage(object):
 
+    _encoding = attr.ib()
     protocol_version_number = attr.ib(default=196608)
     parameters = attr.ib(default={})
 
@@ -75,9 +79,9 @@ class StartupMessage(object):
         res.append(struct.pack("!i", self.protocol_version_number))
 
         for key, val in self.parameters.items():
-            res.append(key.encode("utf8"))
+            res.append(key.encode(self._encoding))
             res.append(b"\0")
-            res.append(val.encode("utf8"))
+            res.append(val.encode(self._encoding))
             res.append(b"\0")
 
         res.append(b"\0")
@@ -91,7 +95,7 @@ class ReadyForQuery(object):
     backend_status = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
         backend_status = BackendTransactionStatus(buf[5:])
 
         return cls(backend_status=backend_status)
@@ -100,11 +104,12 @@ class ReadyForQuery(object):
 @attr.s
 class Query(object):
 
+    _encoding = attr.ib()
     query = attr.ib()
 
     def ser(self):
 
-        res = [self.query.encode("utf8"), b"\0"]
+        res = [self.query.encode(self._encoding), b"\0"]
 
         msg = b"".join(res)
         return MessageType.QUERY + struct.pack("!i", len(msg) + 4) + msg
@@ -113,15 +118,16 @@ class Query(object):
 @attr.s
 class Parse(object):
 
+    _encoding = attr.ib()
     prepared_statement_name = attr.ib()
     query = attr.ib()
 
     def ser(self):
 
         res = [
-            self.prepared_statement_name.encode("utf8"),
+            self.prepared_statement_name.encode(self._encoding),
             b"\0",
-            self.query.encode("utf8"),
+            self.query.encode(self._encoding),
             b"\0",
         ]
 
@@ -135,18 +141,19 @@ class Parse(object):
 @attr.s
 class ParseComplete(object):
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
         return cls()
 
 
 @attr.s
 class Describe(object):
 
+    _encoding = attr.ib()
     prepared_statement_name = attr.ib()
 
     def ser(self):
 
-        res = [b"S", self.prepared_statement_name.encode("utf8"), b"\0"]
+        res = [b"S", self.prepared_statement_name.encode(self._encoding), b"\0"]
 
         msg = b"".join(res)
         return (
@@ -164,6 +171,7 @@ class BindParam(object):
 @attr.s
 class Bind(object):
 
+    _encoding = attr.ib()
     destination_portal = attr.ib()
     prepared_statement = attr.ib()
     parameters = attr.ib()
@@ -173,9 +181,9 @@ class Bind(object):
 
         res = []
 
-        res.append(self.destination_portal.encode("utf8"))
+        res.append(self.destination_portal.encode(self._encoding))
         res.append(b"\0")
-        res.append(self.prepared_statement.encode("utf8"))
+        res.append(self.prepared_statement.encode(self._encoding))
         res.append(b"\0")
 
         # No input format codes
@@ -197,7 +205,7 @@ class Bind(object):
 @attr.s
 class BindComplete(object):
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
         return cls()
 
 
@@ -210,17 +218,25 @@ class Sync(object):
 @attr.s
 class Execute(object):
 
+    _encoding = attr.ib()
     portal_name = attr.ib()
     rows_to_return = attr.ib()
 
     def ser(self):
 
-        res = [self.portal_name.encode("utf8"), b"\0"]
+        res = [self.portal_name.encode(self._encoding), b"\0"]
 
         res.append(struct.pack("!i", self.rows_to_return))
 
         msg = b"".join(res)
         return FrontendMessageType.EXECUTE.value + struct.pack("!i", len(msg) + 4) + msg
+
+
+@attr.s
+class NoData:
+    @classmethod
+    def deser(cls, buf, server_encoding):
+        return cls()
 
 
 @attr.s
@@ -237,7 +253,7 @@ class RowDescription(object):
     values = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
 
         (col_values,) = struct.unpack("!h", buf[5:7])
         content = buf[7:]
@@ -277,10 +293,9 @@ class ParameterDescription:
     object_ids = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
         (parameter_count,) = struct.unpack("!h", buf[5:7])
-
-        ids = struct.unpack("!" + "h" * parameter_count, buf[7:])
+        ids = struct.unpack("!" + "i" * parameter_count, buf[7:])
         return cls(object_ids=ids)
 
 
@@ -290,7 +305,7 @@ class DataRow(object):
     values = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
 
         (col_values,) = struct.unpack("!h", buf[5:7])
         content = buf[7:]
@@ -312,8 +327,8 @@ class CommandComplete(object):
     cmd = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
-        content = buf[5:-1].decode("utf8")
+    def deser(cls, buf, server_encoding):
+        content = buf[5:-1].decode(server_encoding)
         return cls(cmd=content)
 
 
@@ -324,12 +339,12 @@ class ParameterStatus(object):
     val = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
 
         key, val = buf[5:-1].split(b"\0")
 
-        key = key.decode("utf8")
-        val = val.decode("utf8")
+        key = key.decode(server_encoding)
+        val = val.decode(server_encoding)
 
         return cls(name=key, val=val)
 
@@ -341,7 +356,7 @@ class BackendKeyData(object):
     secret_key = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
         proc_id, secret_key = struct.unpack("!ii", buf[5:])
         return cls(process_id=proc_id, secret_key=secret_key)
 
@@ -357,7 +372,7 @@ class Error(object):
     fields = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
 
         fields = []
         content = buf[5:]
@@ -382,7 +397,7 @@ class Notice(object):
     fields = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
 
         fields = []
         content = buf[5:]
@@ -408,6 +423,33 @@ class Flush(object):
 
 
 @attr.s
+class Close(object):
+
+    _encoding = attr.ib()
+    close_type = attr.ib()
+    name = attr.ib()
+
+    def ser(self):
+
+        name_enc = self.name.encode(self._encoding) + b"\0"
+        type_enc = self.close_type.encode(self._encoding)
+
+        return (
+            FrontendMessageType.CLOSE.value
+            + struct.pack("!i", 4 + len(name_enc) + 1)
+            + type_enc
+            + name_enc
+        )
+
+
+@attr.s
+class CloseComplete:
+    @classmethod
+    def deser(cls, buf, server_encoding):
+        return cls()
+
+
+@attr.s
 class Unknown(object):
     """
     Something I haven't implemented yet.
@@ -416,17 +458,18 @@ class Unknown(object):
     content = attr.ib()
 
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
         return cls(content=buf)
 
 
 @attr.s
 class PasswordMessage(object):
 
+    _encoding = attr.ib()
     password = attr.ib()
 
     def ser(self):
-        encoded = self.password.encode("utf8") + b"\0"
+        encoded = self.password.encode(self._encoding) + b"\0"
         return (
             FrontendMessageType.PASSWORD_MESSAGE.value
             + struct.pack("!i", len(encoded) + 4)
@@ -450,7 +493,7 @@ AuthenticationRequestTypes = {0: AuthenticationOk, 3: AuthenticationCleartextPas
 @attr.s
 class AuthenticationRequest(object):
     @classmethod
-    def deser(cls, buf):
+    def deser(cls, buf, server_encoding):
         (typ,) = struct.unpack("!i", buf[5:9])
 
         try:
@@ -462,6 +505,7 @@ class AuthenticationRequest(object):
 class Parser(Enum):
 
     COMMAND_COMPLETE = CommandComplete
+    CLOSE_COMPLETE = CloseComplete
     DATA_ROW = DataRow
     ERROR = Error
     BACKEND_KEY_DATA = BackendKeyData
@@ -473,11 +517,12 @@ class Parser(Enum):
     READY_FOR_QUERY = ReadyForQuery
     PARSE_COMPLETE = ParseComplete
     BIND_COMPLETE = BindComplete
+    NO_DATA = NoData
     UNKNOWN = Unknown
 
 
-def parse_from_buffer(buf):
+def parse_from_buffer(buf, server_encoding):
 
     msg_type = BackendMessageType(buf[0:1])
     parser = Parser[msg_type.name].value
-    return parser.deser(buf)
+    return parser.deser(buf, server_encoding)

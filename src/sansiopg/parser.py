@@ -8,7 +8,8 @@ from .messages import parse_from_buffer
 @attr.s
 class ParserFeed(object):
 
-    _buffer = attr.ib(default=b"")
+    _server_encoding = attr.ib()
+    _buffer = attr.ib(default=b"", init=False)
 
     def feed(self, input):
 
@@ -33,4 +34,4 @@ class ParserFeed(object):
             msg = self._buffer[0 : msg_len + 1]
             self._buffer = self._buffer[msg_len + 1 :]
 
-            messages.append(parse_from_buffer(msg))
+            messages.append(parse_from_buffer(msg, self._server_encoding))
