@@ -26,6 +26,7 @@ class FrontendMessageType(Enum):
     EXECUTE = b"E"
     FLUSH = b"H"
     PARSE = b"P"
+    PASSWORD_MESSAGE = b"p"
     SYNC = b"S"
     QUERY = b"Q"
     UNKNOWN = None
@@ -51,6 +52,7 @@ class BackendMessageType(Enum):
     AUTHENTICATION_REQUEST = b"R"
     PARAMETER_STATUS = b"S"
     ROW_DESCRIPTION = b"T"
+    PARAMETER_DESCRIPTION = b"t"
     READY_FOR_QUERY = b"Z"
     PARSE_COMPLETE = b"1"
     BIND_COMPLETE = b"2"
@@ -270,6 +272,19 @@ class RowDescription(object):
 
 
 @attr.s
+class ParameterDescription:
+
+    object_ids = attr.ib()
+
+    @classmethod
+    def deser(cls, buf):
+        (parameter_count,) = struct.unpack("!h", buf[5:7])
+
+        ids = struct.unpack("!" + "h" * parameter_count, buf[7:])
+        return cls(object_ids=ids)
+
+
+@attr.s
 class DataRow(object):
 
     values = attr.ib()
@@ -300,11 +315,6 @@ class CommandComplete(object):
     def deser(cls, buf):
         content = buf[5:-1].decode("utf8")
         return cls(cmd=content)
-
-
-@attr.s
-class AuthenticationOk(object):
-    pass
 
 
 @attr.s
@@ -406,8 +416,35 @@ class Unknown(object):
     content = attr.ib()
 
     @classmethod
-    def deser(self, buf):
-        return self(buf)
+    def deser(cls, buf):
+        return cls(content=buf)
+
+
+@attr.s
+class PasswordMessage(object):
+
+    password = attr.ib()
+
+    def ser(self):
+        encoded = self.password.encode("utf8") + b"\0"
+        return (
+            FrontendMessageType.PASSWORD_MESSAGE.value
+            + struct.pack("!i", len(encoded) + 4)
+            + encoded
+        )
+
+
+@attr.s
+class AuthenticationOk(object):
+    pass
+
+
+@attr.s
+class AuthenticationCleartextPassword(object):
+    pass
+
+
+AuthenticationRequestTypes = {0: AuthenticationOk, 3: AuthenticationCleartextPassword}
 
 
 @attr.s
@@ -416,10 +453,10 @@ class AuthenticationRequest(object):
     def deser(cls, buf):
         (typ,) = struct.unpack("!i", buf[5:9])
 
-        if typ == 0:
-            return AuthenticationOk()
-
-        print(typ)
+        try:
+            return AuthenticationRequestTypes[typ]()
+        except ValueError:
+            return Unknown.deser(buf)
 
 
 class Parser(Enum):
@@ -432,6 +469,7 @@ class Parser(Enum):
     AUTHENTICATION_REQUEST = AuthenticationRequest
     PARAMETER_STATUS = ParameterStatus
     ROW_DESCRIPTION = RowDescription
+    PARAMETER_DESCRIPTION = ParameterDescription
     READY_FOR_QUERY = ReadyForQuery
     PARSE_COMPLETE = ParseComplete
     BIND_COMPLETE = BindComplete

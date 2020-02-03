@@ -10,3 +10,4 @@ license = "MIT"
 [tool.poetry.dependencies]
 python = "^3.6"  # Compatible python versions must be declared here
 attrs = "^19.1.0"
+automat = "^0.8.0"
