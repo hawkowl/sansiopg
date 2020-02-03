@@ -30,6 +30,7 @@ from .messages import (
     BindComplete,
 )
 from .parser import ParserFeed
+from .conversion import Converter
 
 
 @attr.s
@@ -38,6 +39,20 @@ class PostgreSQLClientProtocol(Protocol):
     username = attr.ib()
     _on_message = attr.ib()
     _parser = attr.ib(factory=ParserFeed)
+    _waiter = attr.ib()
+
+    def register_waiter(self):
+        if self._waiter:
+            raise Exception()
+
+        self._waiter = defer.Deferred()
+        return self._waiter
+
+    def clear_waiter(self):
+        if self._waiter:
+            if not self._waiter.result:
+                raise Exception()
+        self._waiter = None
 
     def send(self, msg):
         print(">>> " + repr(msg))
@@ -99,86 +114,96 @@ class NotARealStateMachine(Enum):
     NEEDS_AUTH = 5
     WAITING_FOR_QUERY_COMPLETE = 6
 
+from automat import MethodicalMachine
 
-def _int_to_postgres(val):
-    return BindParam(0, str(val).encode("utf8"))
-
-
-def _str_to_postgres(val):
-    return BindParam(0, val.encode("utf8"))
-
-
-def _text_text_from_postgres(val):
-    return val.decode("utf8")
-
-
-def _bool_text_from_postgres(val):
-    if val == b"t":
-        return True
-    elif val == b"f":
-        return False
-    else:
-        raise ValueError()
-
-
+@attr.s
 class PostgresConnection(object):
-    def __init__(self):
-        self._converters = {
-            int: _int_to_postgres,
-            str: _str_to_postgres,
-            (DataType.NAME, FormatType.TEXT): _text_text_from_postgres,
-            (DataType.TEXT, FormatType.TEXT): _text_text_from_postgres,
-            (DataType.BOOL, FormatType.TEXT): _bool_text_from_postgres,
-        }
 
-    def convertToPostgres(self, value):
+    _machine = MethodicalMachine()
 
-        try:
-            conv = self._converters.get(type(value))
-            return conv(value)
-        except:
-            print("Can't convert ", value)
-            raise ValueError()
+    _converter = attr.ib(factory=Converter)
+    _targets = attr.ib(factory=list)
 
-    def convertFromPostgres(self, value, row_format):
+    @_machine.state(initial=True)
+    def DISCONNECTED(self):
+        """
+        Not connected.
+        """
 
-        try:
-            conv = self._converters.get((row_format.data_type, row_format.format_code))
-            return conv(value)
-        except:
-            # print("Can't convert ", value, row_format)
-            # print("Falling back to text decode")
-            if row_format.format_code == FormatType.TEXT:
-                return value.decode("utf8")
+    @_machine.state()
+    def WAITING_FOR_READY(self):
+        pass
 
+    @_machine.state()
+    def WAITING_FOR_PARSE(self):
+        pass
+
+    @_machine.state()
+    def WAITING_FOR_DESCRIBE(self):
+        pass
+
+    @_machine.state()
+    def WAITING_FOR_BIND(self):
+        pass
+
+    @_machine.state()
+    def READY(self):
+        pass
+
+    @_machine.state()
+    def NEEDS_AUTH(self):
+        pass
+
+    @_machine.state()
+    def WAITING_FOR_QUERY_COMPLETE(self):
+        pass
+
+
+    @_machine.input()
     def connect(self, endpoint, username):
-        from twisted.internet.protocol import Factory
+        pass
 
-        self._state = NotARealStateMachine.WAITING_FOR_READY
-        self._waiting = None
+    @_machine.output()
+    def do_connect(self, endpoint, username):
+        from twisted.internet.protocol import Factory
 
         self._pg = PostgreSQLClientProtocol(username, self._onMessage)
 
-        self._waiting = defer.Deferred()
-
+        connected = defer.Deferred()
         cf = Factory.forProtocol(lambda: self._pg)
+        return endpoint.connect(cf)
 
-        d = endpoint.connect(cf)
-        d.errback(print)
-        d.errback(self._waiting.callback)
+    @_machine.output()
+    def wait_for_ready(self, endpoint, username):
+        self._ready_callback = defer.Deferred()
+        return self._ready_callback
 
-        return self._waiting
+
+    @_machine.input()
+    def _REMOTE_READY_FOR_QUERY(self, message):
+        pass
+
+    @_machine.input()
+    def _REMOTE_PARSE_COMPLETE(self, message):
+        pass
+
+    @_machine.output()
+    def on_ready(self, message):
+        self._ready_callback.callback(message.backend_status)
+
+    DISCONNECTED.upon(connect, enter=WAITING_FOR_READY, outputs=[do_connect, wait_for_ready])
+
+    WAITING_FOR_READY.upon(_REMOTE_PARSE_COMPLETE, enter=WAITING_FOR_DESCRIBE, output=[on_ready])
+
 
     async def extQuery(self, query, vals):
 
         self._dataRows = []
         self._desc = None
 
-        self._waiting = defer.Deferred()
         self._state = NotARealStateMachine.WAITING_FOR_PARSE
         self._pg.sendParse(query)
 
-        await self._waiting
 
         self._waiting = defer.Deferred()
         self._state = NotARealStateMachine.WAITING_FOR_DESCRIBE
@@ -215,6 +240,10 @@ class PostgresConnection(object):
         """
         Collate the responses of a query.
         """
+
+        for row in self._desc.values:
+            if row.field_name == b"?column?":
+                row.field_name = b"anonymous"
 
         res = namedtuple(
             "Result", [x.field_name.decode("utf8") for x in self._desc.values]
@@ -264,7 +293,7 @@ class PostgresConnection(object):
                 self._waiting, waiting = None, self._waiting
                 waiting.callback(True)
             else:
-                print("Do not understand!")
+                print("Do not understand!", self._state)
                 print(message)
 
         elif self._state == NotARealStateMachine.WAITING_FOR_DESCRIBE:
@@ -280,7 +309,7 @@ class PostgresConnection(object):
                 self._waiting, waiting = None, self._waiting
                 waiting.callback(True)
             else:
-                print("Do not understand!")
+                print("Do not understand!", self._state)
                 print(message)
 
         elif self._state == NotARealStateMachine.WAITING_FOR_QUERY_COMPLETE:
@@ -291,7 +320,7 @@ class PostgresConnection(object):
             elif isinstance(message, DataRow):
                 self._addDataRow(message)
             else:
-                print("Do not understand!")
+                print("Do not understand!", self._state)
                 print(message)
 
         else:

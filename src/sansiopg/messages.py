@@ -2,6 +2,7 @@ import attr
 
 import struct
 from enum import Enum
+import enum
 
 
 class FormatType(Enum):
@@ -29,10 +30,18 @@ class FrontendMessageType(Enum):
     QUERY = b"Q"
     UNKNOWN = None
 
-    def _missing_(self, value):
-        return self.UNKNOWN
+    def _missing_(value):
+        return FrontendMessageType.UNKNOWN
 
 
+class BackendTransactionStatus(Enum):
+
+    IDLE = b"I"
+    IN_TRANSACTION = b"T"
+    IN_ERRORED_TRANSACTION = b"E"
+
+
+@enum.unique
 class BackendMessageType(Enum):
     COMMAND_COMPLETE = b"C"
     DATA_ROW = b"D"
@@ -47,8 +56,8 @@ class BackendMessageType(Enum):
     BIND_COMPLETE = b"2"
     UNKNOWN = None
 
-    def _missing_(self, value):
-        return self.UNKNOWN
+    def _missing_(value):
+        return BackendMessageType.UNKNOWN
 
 
 @attr.s
@@ -81,7 +90,7 @@ class ReadyForQuery(object):
 
     @classmethod
     def deser(cls, buf):
-        backend_status = buf[5:]
+        backend_status = BackendTransactionStatus(buf[5:])
 
         return cls(backend_status=backend_status)
 
@@ -118,7 +127,7 @@ class Parse(object):
         res.append(struct.pack("!h", 0))
 
         msg = b"".join(res)
-        return FrontendMessageType.PARSE + struct.pack("!i", len(msg) + 4) + msg
+        return FrontendMessageType.PARSE.value + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -138,7 +147,9 @@ class Describe(object):
         res = [b"S", self.prepared_statement_name.encode("utf8"), b"\0"]
 
         msg = b"".join(res)
-        return MessageType.DESCRIBE + struct.pack("!i", len(msg) + 4) + msg
+        return (
+            FrontendMessageType.DESCRIBE.value + struct.pack("!i", len(msg) + 4) + msg
+        )
 
 
 @attr.s
@@ -178,7 +189,7 @@ class Bind(object):
         res.append(struct.pack("!h", 0))
 
         msg = b"".join(res)
-        return FrontendMessageType.BIND + struct.pack("!i", len(msg) + 4) + msg
+        return FrontendMessageType.BIND.value + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -191,7 +202,7 @@ class BindComplete(object):
 @attr.s
 class Sync(object):
     def ser(self):
-        return FrontendMessageType.SYNC + struct.pack("!i", 4)
+        return FrontendMessageType.SYNC.value + struct.pack("!i", 4)
 
 
 @attr.s
@@ -207,7 +218,7 @@ class Execute(object):
         res.append(struct.pack("!i", self.rows_to_return))
 
         msg = b"".join(res)
-        return FrontendMessageType.EXECUTE + struct.pack("!i", len(msg) + 4) + msg
+        return FrontendMessageType.EXECUTE.value + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -383,7 +394,7 @@ class Notice(object):
 @attr.s
 class Flush(object):
     def ser(self):
-        return FrontendMessageType.FLUSH + struct.pack("!i", 4)
+        return FrontendMessageType.FLUSH.value + struct.pack("!i", 4)
 
 
 @attr.s
@@ -408,27 +419,27 @@ class AuthenticationRequest(object):
         if typ == 0:
             return AuthenticationOk()
 
-    print(typ)
+        print(typ)
 
 
 class Parser(Enum):
 
-    BackendMessageType.COMMAND_COMPLETE = CommandComplete
-    BackendMessageType.DATA_ROW = DataRow
-    BackendMessageType.ERROR = Error
-    BackendMessageType.BACKEND_KEY_DATA = BackendKeyData
-    BackendMessageType.NOTICE = Notice
-    BackendMessageType.AUTHENTICATION_REQUEST = AuthenticationRequest
-    BackendMessageType.PARAMETER_STATUS = ParameterStatus
-    BackendMessageType.ROW_DESCRIPTION = RowDescription
-    BackendMessageType.READY_FOR_QUERY = ReadyForQuery
-    BackendMessageType.PARSE_COMPLETE = ParseComplete
-    BackendMessageType.BIND_COMPLETE = BindComplete
-    BackendMessageType.UNKNOWN = Unknown
+    COMMAND_COMPLETE = CommandComplete
+    DATA_ROW = DataRow
+    ERROR = Error
+    BACKEND_KEY_DATA = BackendKeyData
+    NOTICE = Notice
+    AUTHENTICATION_REQUEST = AuthenticationRequest
+    PARAMETER_STATUS = ParameterStatus
+    ROW_DESCRIPTION = RowDescription
+    READY_FOR_QUERY = ReadyForQuery
+    PARSE_COMPLETE = ParseComplete
+    BIND_COMPLETE = BindComplete
+    UNKNOWN = Unknown
 
 
 def parse_from_buffer(buf):
 
-    msg_type = BackendMessageType[buf[0:1]]
-    parser = Parser[msg_type]
+    msg_type = BackendMessageType(buf[0:1])
+    parser = Parser[msg_type.name].value
     return parser.deser(buf)
