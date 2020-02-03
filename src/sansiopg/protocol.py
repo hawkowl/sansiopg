@@ -1,36 +1,41 @@
-import attr
-from twisted.internet.protocol import Protocol
-from twisted.internet import defer
-from collections import namedtuple
-
-from enum import Enum
+import re
 import struct
+from collections import namedtuple
+from enum import Enum
+
+import attr
+from automat import MethodicalMachine
+from twisted.internet import defer
+from twisted.internet.protocol import Protocol
+
+from .conversion import Converter
 from .messages import (
-    StartupMessage,
-    FormatType,
-    DataType,
     AuthenticationOk,
-    Query,
     BackendKeyData,
-    BindParam,
-    Execute,
-    DataRow,
-    Sync,
-    CommandComplete,
-    RowDescription,
-    Parse,
-    ParameterStatus,
     Bind,
-    ReadyForQuery,
-    Describe,
-    Notice,
-    Error,
-    Flush,
-    ParseComplete,
     BindComplete,
+    BindParam,
+    CommandComplete,
+    DataRow,
+    DataType,
+    Describe,
+    Error,
+    Execute,
+    Flush,
+    FormatType,
+    Notice,
+    ParameterStatus,
+    Parse,
+    ParseComplete,
+    Query,
+    ReadyForQuery,
+    RowDescription,
+    StartupMessage,
+    Sync,
 )
 from .parser import ParserFeed
-from .conversion import Converter
+
+_convert_to_underscores_lmao = re.compile(r"(?<!^)(?=[A-Z])")
 
 
 @attr.s
@@ -39,20 +44,6 @@ class PostgreSQLClientProtocol(Protocol):
     username = attr.ib()
     _on_message = attr.ib()
     _parser = attr.ib(factory=ParserFeed)
-    _waiter = attr.ib()
-
-    def register_waiter(self):
-        if self._waiter:
-            raise Exception()
-
-        self._waiter = defer.Deferred()
-        return self._waiter
-
-    def clear_waiter(self):
-        if self._waiter:
-            if not self._waiter.result:
-                raise Exception()
-        self._waiter = None
 
     def send(self, msg):
         print(">>> " + repr(msg))
@@ -103,18 +94,18 @@ class PostgreSQLClientProtocol(Protocol):
         self.flush()
 
 
-class NotARealStateMachine(Enum):
+def _get_last_collector(results):
 
-    DISCONNECTED = 0
-    WAITING_FOR_READY = 1
-    WAITING_FOR_PARSE = 2
-    WAITING_FOR_DESCRIBE = 7
-    WAITING_FOR_BIND = 3
-    READY = 4
-    NEEDS_AUTH = 5
-    WAITING_FOR_QUERY_COMPLETE = 6
+    results = list(results)
 
-from automat import MethodicalMachine
+    for res in results:
+        if not isinstance(res, defer.Deferred):
+            results.remove(res)
+
+    r = defer.DeferredList(list(results), fireOnOneErrback=True, consumeErrors=True)
+    r.addCallback(lambda res: res[1])
+    return r
+
 
 @attr.s
 class PostgresConnection(object):
@@ -123,6 +114,7 @@ class PostgresConnection(object):
 
     _converter = attr.ib(factory=Converter)
     _targets = attr.ib(factory=list)
+    _dataRows = attr.ib(factory=list)
 
     @_machine.state(initial=True)
     def DISCONNECTED(self):
@@ -147,7 +139,7 @@ class PostgresConnection(object):
         pass
 
     @_machine.state()
-    def READY(self):
+    def READY_FOR_QUERY(self):
         pass
 
     @_machine.state()
@@ -157,7 +149,6 @@ class PostgresConnection(object):
     @_machine.state()
     def WAITING_FOR_QUERY_COMPLETE(self):
         pass
-
 
     @_machine.input()
     def connect(self, endpoint, username):
@@ -178,7 +169,6 @@ class PostgresConnection(object):
         self._ready_callback = defer.Deferred()
         return self._ready_callback
 
-
     @_machine.input()
     def _REMOTE_READY_FOR_QUERY(self, message):
         pass
@@ -187,51 +177,108 @@ class PostgresConnection(object):
     def _REMOTE_PARSE_COMPLETE(self, message):
         pass
 
+    @_machine.input()
+    def _REMOTE_PARSE_COMPLETE(self, message):
+        pass
+
+    @_machine.input()
+    def _REMOTE_ROW_DESCRIPTION(self, message):
+        pass
+
+    @_machine.input()
+    def _REMOTE_BIND_COMPLETE(self, message):
+        pass
+
+    @_machine.input()
+    def _REMOTE_QUERY_COMPLETE(self, message):
+        pass
+
+    @_machine.input()
+    def _REMOTE_DATA_ROW(self, message):
+        pass
+
     @_machine.output()
     def on_ready(self, message):
         self._ready_callback.callback(message.backend_status)
 
-    DISCONNECTED.upon(connect, enter=WAITING_FOR_READY, outputs=[do_connect, wait_for_ready])
+    DISCONNECTED.upon(
+        connect,
+        enter=WAITING_FOR_READY,
+        outputs=[do_connect, wait_for_ready],
+        collector=_get_last_collector,
+    )
 
-    WAITING_FOR_READY.upon(_REMOTE_PARSE_COMPLETE, enter=WAITING_FOR_DESCRIBE, output=[on_ready])
+    WAITING_FOR_READY.upon(
+        _REMOTE_READY_FOR_QUERY, enter=READY_FOR_QUERY, outputs=[on_ready]
+    )
 
+    @_machine.input()
+    def query(self, query, vals):
+        pass
 
-    async def extQuery(self, query, vals):
-
-        self._dataRows = []
-        self._desc = None
-
-        self._state = NotARealStateMachine.WAITING_FOR_PARSE
+    @_machine.output()
+    def _do_query(self, query, vals):
+        self._currentQuery = query
+        self._currentVals = vals
         self._pg.sendParse(query)
 
+    @_machine.output()
+    def _wait_for_result(self, query, vals):
+        self._result_callback = defer.Deferred()
+        self._result_callback.addCallback(lambda x: self._collate())
+        return self._result_callback
 
-        self._waiting = defer.Deferred()
-        self._state = NotARealStateMachine.WAITING_FOR_DESCRIBE
+    READY_FOR_QUERY.upon(
+        query,
+        enter=WAITING_FOR_PARSE,
+        outputs=[_do_query, _wait_for_result],
+        collector=_get_last_collector,
+    )
+
+    @_machine.output()
+    def _do_send_describe(self, message):
         self._pg.sendDescribe()
 
-        await self._waiting
+    WAITING_FOR_PARSE.upon(
+        _REMOTE_PARSE_COMPLETE, enter=WAITING_FOR_DESCRIBE, outputs=[_do_send_describe]
+    )
 
-        bind_vals = [self.convertToPostgres(x) for x in vals]
-
-        self._waiting = defer.Deferred()
-        self._state = NotARealStateMachine.WAITING_FOR_BIND
+    @_machine.output()
+    def _on_row_description(self, message):
+        bind_vals = [self._converter.to_postgres(x) for x in self._currentVals]
         self._pg.sendBind(bind_vals)
 
-        await self._waiting
+    WAITING_FOR_DESCRIBE.upon(
+        _REMOTE_ROW_DESCRIPTION, enter=WAITING_FOR_BIND, outputs=[_on_row_description]
+    )
 
-        self._waiting = defer.Deferred()
-        self._state = NotARealStateMachine.WAITING_FOR_QUERY_COMPLETE
+    @_machine.output()
+    def _on_bind_complete(self, message):
         self._pg.sendExecute("")
 
-        await self._waiting
+    WAITING_FOR_BIND.upon(
+        _REMOTE_BIND_COMPLETE,
+        enter=WAITING_FOR_QUERY_COMPLETE,
+        outputs=[_on_bind_complete],
+    )
 
-        self._waiting = defer.Deferred()
-        self._state = NotARealStateMachine.WAITING_FOR_READY
-        self._pg.sendSync()
+    @_machine.output()
+    def _store_row(self, message):
+        self._addDataRow(message)
 
-        await self._waiting
+    WAITING_FOR_QUERY_COMPLETE.upon(
+        _REMOTE_DATA_ROW, enter=WAITING_FOR_QUERY_COMPLETE, outputs=[_store_row]
+    )
 
-        return self._collate()
+    @_machine.output()
+    def _on_query_complete(self, message):
+        self._currentQuery = None
+        self._currentVals = None
+        self._result_callback.callback(True)
+
+    WAITING_FOR_QUERY_COMPLETE.upon(
+        _REMOTE_QUERY_COMPLETE, enter=READY_FOR_QUERY, outputs=[_on_query_complete]
+    )
 
     def _addDataRow(self, msg):
         self._dataRows.append(msg.values)
@@ -257,6 +304,8 @@ class PostgresConnection(object):
                 row.append(self.convertFromPostgres(x, form))
             resp.append(res(*row))
 
+        self._dataRows.clear()
+
         return resp
 
     def _onMessage(self, message):
@@ -269,60 +318,15 @@ class PostgresConnection(object):
             self._pg.transport.loseConnection()
             return
 
-        if self._state == NotARealStateMachine.WAITING_FOR_READY:
-            if isinstance(message, ReadyForQuery):
-                self._state = NotARealStateMachine.READY
-                self._waiting, waiting = None, self._waiting
-                waiting.callback(True)
-            elif isinstance(message, ParameterStatus):
-                # Don't care
-                pass
-            elif isinstance(message, AuthenticationOk):
-                # Don't care
-                pass
-            elif isinstance(message, BackendKeyData):
-                # Don't care
-                pass
-            else:
-                print("Do not understand!")
-                print(message)
+        rem = _convert_to_underscores_lmao.sub("_", message.__class__.__name__).upper()
 
-        elif self._state == NotARealStateMachine.WAITING_FOR_PARSE:
-            if isinstance(message, ParseComplete):
-                self._state = NotARealStateMachine.READY
-                self._waiting, waiting = None, self._waiting
-                waiting.callback(True)
-            else:
-                print("Do not understand!", self._state)
-                print(message)
+        func = getattr(self, "_REMOTE_" + rem, None)
 
-        elif self._state == NotARealStateMachine.WAITING_FOR_DESCRIBE:
-            if isinstance(message, RowDescription):
-                self._desc = message
-                self._state = NotARealStateMachine.READY
-                self._waiting, waiting = None, self._waiting
-                waiting.callback(True)
+        print(rem)
+        if func is None:
+            print(f"Ignoring incoming message {message}")
+            return
 
-        elif self._state == NotARealStateMachine.WAITING_FOR_BIND:
-            if isinstance(message, BindComplete):
-                self._state = NotARealStateMachine.READY
-                self._waiting, waiting = None, self._waiting
-                waiting.callback(True)
-            else:
-                print("Do not understand!", self._state)
-                print(message)
+        func(message)
 
-        elif self._state == NotARealStateMachine.WAITING_FOR_QUERY_COMPLETE:
-            if isinstance(message, CommandComplete):
-                self._state = NotARealStateMachine.WAITING_FOR_READY
-                self._waiting, waiting = None, self._waiting
-                waiting.callback(True)
-            elif isinstance(message, DataRow):
-                self._addDataRow(message)
-            else:
-                print("Do not understand!", self._state)
-                print(message)
-
-        else:
-            print("current state", self._state)
-            print("message", message)
+        return

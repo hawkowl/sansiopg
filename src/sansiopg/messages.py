@@ -1,8 +1,8 @@
-import attr
-
+import enum
 import struct
 from enum import Enum
-import enum
+
+import attr
 
 
 class FormatType(Enum):

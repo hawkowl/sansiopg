@@ -1,5 +1,6 @@
-import attr
 import struct
+
+import attr
 
 from .messages import parse_from_buffer
 
