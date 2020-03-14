@@ -208,7 +208,7 @@ class PostgresConnection(object):
         pass
 
     @_machine.state()
-    def READY_FOR_QUERY(self):
+    def READY(self):
         pass
 
     @_machine.state()
@@ -224,7 +224,7 @@ class PostgresConnection(object):
         pass
 
     @_machine.input()
-    def _REMOTE_READY_FOR_QUERY(self, message):
+    def _REMOTE_READY(self, message):
         pass
 
     @_machine.input()
@@ -341,11 +341,11 @@ class PostgresConnection(object):
     )
 
     WAITING_FOR_READY.upon(
-        _REMOTE_READY_FOR_QUERY, enter=READY_FOR_QUERY, outputs=[_on_connected]
+        _REMOTE_READY, enter=READY, outputs=[_on_connected]
     )
 
     COMMAND_COMPLETE.upon(
-        _REMOTE_READY_FOR_QUERY, enter=READY_FOR_QUERY, outputs=[_on_connected]
+        _REMOTE_READY, enter=READY, outputs=[_on_connected]
     )
 
     @_machine.input()
@@ -370,7 +370,7 @@ class PostgresConnection(object):
     def _wait_for_ready_on_query(self, query, vals):
         return self._wait_for_ready()
 
-    READY_FOR_QUERY.upon(
+    READY.upon(
         query,
         enter=WAITING_FOR_PARSE,
         outputs=[_do_query, _wait_for_ready_on_query, _wait_for_result],
@@ -482,7 +482,7 @@ class PostgresConnection(object):
         self._pg.close()
         return self._ready_callback
 
-    COMMAND_COMPLETE.upon(
+    READY.upon(
         close,
         enter=WAITING_FOR_CLOSE,
         outputs=[_do_close],
