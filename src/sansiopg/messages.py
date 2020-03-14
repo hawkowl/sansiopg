@@ -1,8 +1,11 @@
 import enum
 import struct
+import re
 from enum import Enum
 
 import attr
+
+_SPLIT_DELIMITER = re.compile(rb"(?<!\\)\t")
 
 
 class FormatType(Enum):
@@ -61,6 +64,7 @@ class BackendMessageType(Enum):
     CLOSE_COMPLETE = b"3"
     COPY_OUT_RESPONSE = b"H"
     COPY_DONE = b"c"
+    COPY_DATA = b"d"
     UNKNOWN = None
 
     def _missing_(value):
@@ -114,7 +118,7 @@ class Query(object):
         res = [self.query.encode(self._encoding), b"\0"]
 
         msg = b"".join(res)
-        return FrontendMessageType.QUERY + struct.pack("!i", len(msg) + 4) + msg
+        return FrontendMessageType.QUERY.value + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -460,13 +464,13 @@ class CopyOutResponse:
     @classmethod
     def deser(cls, buf, server_encoding):
 
-        overall_copy_format = struct.unpack("!b", buf[5:6])
-        column_count = struct.unpack("!h", buf[6:8])
+        overall_copy_format = struct.unpack("!b", buf[5:6])[0]
+        column_count = struct.unpack("!h", buf[6:8])[0]
         column_formats = []
 
         for x in range(column_count):
             offset = 8 + (2 * x)
-            column_formats.append(struct.unpack("!h", buf[offset : offset + 2]))
+            column_formats.append(struct.unpack("!h", buf[offset : offset + 2])[0])
 
         return cls(
             overall_copy_format=overall_copy_format, column_formats=column_formats
@@ -479,7 +483,11 @@ class CopyData:
 
     @classmethod
     def deser(cls, buf, server_encoding):
-        return cls(data=buf[5:])
+        # 5 is the size buffer onwards
+        # -1 because it's got a \n at the end
+        sep = _SPLIT_DELIMITER.split(buf[5:-1])
+
+        return cls(data=sep)
 
 
 @attr.s

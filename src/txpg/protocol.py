@@ -102,11 +102,19 @@ class PostgreSQLClientProtocol(Protocol):
         self.flush()
 
 
+@attr.s
 class TwistedIOImplementation:
+
+    debug = attr.ib(default=False)
+
     def connect(self, connection, endpoint, database, username, password=None):
 
         connection._pg = PostgreSQLClientProtocol(
-            database, username, connection._onMessage, encoding=self.encoding
+            database,
+            username,
+            connection._onMessage,
+            encoding=connection.encoding,
+            debug=self.debug,
         )
         cf = Factory.forProtocol(lambda: connection._pg)
 
@@ -120,15 +128,3 @@ class TwistedIOImplementation:
 
     def add_callback(self, future, callback):
         future.addCallback(callback)
-
-    def _get_last_collector(self, results):
-
-        results = list(results)
-
-        for res in results:
-            if not isinstance(res, defer.Deferred):
-                results.remove(res)
-
-        r = defer.DeferredList(list(results), fireOnOneErrback=True, consumeErrors=True)
-        r.addCallback(lambda res: res[-1][-1])
-        return r

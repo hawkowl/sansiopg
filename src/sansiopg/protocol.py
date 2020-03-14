@@ -10,6 +10,27 @@ from .messages import Notice, Error
 _convert_to_underscores_lmao = re.compile(r"(?<!^)(?=[A-Z])")
 
 
+def _get_last_collector(results):
+
+    try:
+        from twisted.internet.defer import Deferred, DeferredList
+    except ImportError:
+        Deferred = None
+
+    results = list(results)
+
+    if Deferred in map(type, results):
+        for res in results:
+            if not isinstance(res, Deferred):
+                results.remove(res)
+
+        r = DeferredList(list(results), fireOnOneErrback=True, consumeErrors=True)
+        r.addCallback(lambda res: res[-1][-1])
+        return r
+
+    return results
+
+
 @attr.s
 class Transaction:
 
@@ -46,9 +67,6 @@ class PostgresConnection(object):
     _dataRows = attr.ib(factory=list, init=False, repr=False)
     _auth = attr.ib(default=None, init=False, repr=False)
     _parameters = attr.ib(factory=dict, init=False)
-
-    def _get_last_collector(self, *args, **kwargs):
-        self._io_impl._get_last_collector(*args, **kwargs)
 
     @_machine.state(initial=True)
     def DISCONNECTED(self):
@@ -97,7 +115,11 @@ class PostgresConnection(object):
         pass
 
     @_machine.state()
-    def REMOTE_BIND_COMPLETE(self):
+    def EXECUTING(self):
+        pass
+
+    @_machine.state()
+    def WAITING_FOR_COPY_OUT_RESPONSE(self):
         pass
 
     @_machine.state()
@@ -109,7 +131,7 @@ class PostgresConnection(object):
         pass
 
     @_machine.input()
-    def _REMOTE_READY(self, message):
+    def _REMOTE_READY_FOR_QUERY(self, message):
         pass
 
     @_machine.input()
@@ -178,7 +200,7 @@ class PostgresConnection(object):
         if password:
             self._auth = password
 
-        return self._io_impl.connect(endpoint, database, username)
+        return self._io_impl.connect(self, endpoint, database, username)
 
     @_machine.output()
     def _wait_for_ready_on_connect(self, database, username, password):
@@ -226,9 +248,11 @@ class PostgresConnection(object):
         _REMOTE_PARAMETER_STATUS, enter=WAITING_FOR_READY, outputs=[_register_parameter]
     )
 
-    WAITING_FOR_READY.upon(_REMOTE_READY, enter=READY, outputs=[_on_connected])
+    WAITING_FOR_READY.upon(
+        _REMOTE_READY_FOR_QUERY, enter=READY, outputs=[_on_connected]
+    )
 
-    COMMAND_COMPLETE.upon(_REMOTE_READY, enter=READY, outputs=[_on_connected])
+    COMMAND_COMPLETE.upon(_REMOTE_READY_FOR_QUERY, enter=READY, outputs=[_on_connected])
 
     @_machine.input()
     def query(self, query, vals):
@@ -274,6 +298,7 @@ class PostgresConnection(object):
 
     @_machine.output()
     def _on_row_description(self, message):
+        print(message.values)
         self._currentDescription = message.values
 
     @_machine.output()
@@ -292,51 +317,18 @@ class PostgresConnection(object):
     )
 
     @_machine.output()
-    def _on_bind_complete(self, message):
+    def _send_execute(self, message):
         self._pg.sendExecute("")
 
     WAITING_FOR_BIND.upon(
-        _REMOTE_BIND_COMPLETE, enter=REMOTE_BIND_COMPLETE, outputs=[_on_bind_complete]
+        _REMOTE_BIND_COMPLETE, enter=EXECUTING, outputs=[_send_execute]
     )
 
     @_machine.output()
     def _store_row(self, message):
         self._addDataRow(message)
 
-    REMOTE_BIND_COMPLETE.upon(
-        _REMOTE_DATA_ROW, enter=REMOTE_BIND_COMPLETE, outputs=[_store_row]
-    )
-
-    @_machine.output()
-    def _on_copy_out_response(self, message):
-        pass
-
-    REMOTE_BIND_COMPLETE.upon(
-        _REMOTE_COPY_OUT_RESPONSE,
-        enter=RECEIVING_COPY_DATA,
-        outputs=[_on_copy_out_response],
-    )
-
-    @_machine.output()
-    def _on_copy_data(self, message):
-        print(message)
-        pass
-
-    RECEIVING_COPY_DATA.upon(
-        _REMOTE_COPY_DATA, enter=RECEIVING_COPY_DATA, outputs=[_on_copy_data]
-    )
-
-    RECEIVING_COPY_DATA.upon(_REMOTE_COPY_DONE, enter=COPY_OUT_COMPLETE, outputs=[])
-
-    @_machine.output()
-    def _on_copy_out_complete(self, message):
-        pass
-
-    COPY_OUT_COMPLETE.upon(
-        _REMOTE_COMMAND_COMPLETE,
-        enter=COMMAND_COMPLETE,
-        outputs=[_on_copy_out_complete],
-    )
+    EXECUTING.upon(_REMOTE_DATA_ROW, enter=EXECUTING, outputs=[_store_row])
 
     @_machine.output()
     def _on_command_complete(self, message):
@@ -345,7 +337,7 @@ class PostgresConnection(object):
         self._io_impl.trigger_callback(self._result_callback, True)
         self._pg.sync()
 
-    REMOTE_BIND_COMPLETE.upon(
+    EXECUTING.upon(
         _REMOTE_COMMAND_COMPLETE, enter=COMMAND_COMPLETE, outputs=[_on_command_complete]
     )
 
@@ -424,17 +416,65 @@ class PostgresConnection(object):
         return Transaction(self)
 
     @_machine.input()
-    def copy_out(self, func, table):
+    def copy_out(self, target, table=None, query=None):
         pass
 
     @_machine.output()
-    def _do_copy_out(self, func, table):
+    def _do_copy_out(self, target, table=None, query=None):
 
-        self._copy_out_func = func
+        self._copy_out_func = target
 
-        query = "COPY ? TO STDOUT"
-        vals = [table]
+        if table is not None and query is not None:
+            raise Exception("Only one must be provided")
+
+        if table:
+            target_query = "COPY " + table.replace('"', '""') + " TO STDOUT"
+        elif query:
+            target_query = "COPY (" + query + ") TO STDOUT"
+
+        # target_query += " WITH (FORMAT binary)"
 
         self._currentQuery = query
-        self._currentVals = vals
-        self._pg.sendParse(query)
+        self._currentVals = []
+        self._ready_callback = self._io_impl.make_callback()
+        self._pg.sendParse(target_query)
+
+        return self._ready_callback
+
+    READY.upon(
+        copy_out,
+        enter=WAITING_FOR_PARSE,
+        outputs=[_do_copy_out],
+        collector=_get_last_collector,
+    )
+
+    @_machine.output()
+    def _on_copy_out_response(self, message):
+        pass
+
+    EXECUTING.upon(
+        _REMOTE_COPY_OUT_RESPONSE,
+        enter=RECEIVING_COPY_DATA,
+        outputs=[_on_copy_out_response],
+    )
+
+    @_machine.output()
+    def _on_copy_data(self, message):
+        self._copy_out_func(message)
+
+    RECEIVING_COPY_DATA.upon(
+        _REMOTE_COPY_DATA, enter=RECEIVING_COPY_DATA, outputs=[_on_copy_data]
+    )
+
+    RECEIVING_COPY_DATA.upon(_REMOTE_COPY_DONE, enter=COPY_OUT_COMPLETE, outputs=[])
+
+    @_machine.output()
+    def _on_copy_out_complete(self, message):
+        # self._io_impl.trigger_callback(self._copy_out_complete_callback, True)
+        pass
+
+    COPY_OUT_COMPLETE.upon(
+        _REMOTE_COMMAND_COMPLETE,
+        enter=COMMAND_COMPLETE,
+        outputs=[_on_copy_out_complete],
+    )
