@@ -59,6 +59,8 @@ class BackendMessageType(Enum):
     PARSE_COMPLETE = b"1"
     BIND_COMPLETE = b"2"
     CLOSE_COMPLETE = b"3"
+    COPY_OUT_RESPONSE = b"H"
+    COPY_DONE = b"c"
     UNKNOWN = None
 
     def _missing_(value):
@@ -112,7 +114,7 @@ class Query(object):
         res = [self.query.encode(self._encoding), b"\0"]
 
         msg = b"".join(res)
-        return MessageType.QUERY + struct.pack("!i", len(msg) + 4) + msg
+        return FrontendMessageType.QUERY + struct.pack("!i", len(msg) + 4) + msg
 
 
 @attr.s
@@ -450,6 +452,44 @@ class CloseComplete:
 
 
 @attr.s
+class CopyOutResponse:
+
+    overall_copy_format = attr.ib()
+    column_formats = attr.ib()
+
+    @classmethod
+    def deser(cls, buf, server_encoding):
+
+        overall_copy_format = struct.unpack("!b", buf[5:6])
+        column_count = struct.unpack("!h", buf[6:8])
+        column_formats = []
+
+        for x in range(column_count):
+            offset = 8 + (2 * x)
+            column_formats.append(struct.unpack("!h", buf[offset : offset + 2]))
+
+        return cls(
+            overall_copy_format=overall_copy_format, column_formats=column_formats
+        )
+
+
+@attr.s
+class CopyData:
+    data = attr.ib()
+
+    @classmethod
+    def deser(cls, buf, server_encoding):
+        return cls(data=buf[5:])
+
+
+@attr.s
+class CopyDone:
+    @classmethod
+    def deser(cls, buf, server_encoding):
+        return cls()
+
+
+@attr.s
 class Unknown(object):
     """
     Something I haven't implemented yet.
@@ -518,6 +558,9 @@ class Parser(Enum):
     PARSE_COMPLETE = ParseComplete
     BIND_COMPLETE = BindComplete
     NO_DATA = NoData
+    COPY_OUT_RESPONSE = CopyOutResponse
+    COPY_DATA = CopyData
+    COPY_DONE = CopyDone
     UNKNOWN = Unknown
 
 

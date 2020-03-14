@@ -1,140 +1,13 @@
 import re
-import struct
 from collections import namedtuple
-from enum import Enum
 
 import attr
 from automat import MethodicalMachine
-from twisted.internet import defer
-from twisted.internet.protocol import Protocol
 
 from .conversion import Converter
-from .messages import (
-    AuthenticationOk,
-    BackendKeyData,
-    Bind,
-    BindComplete,
-    BindParam,
-    CommandComplete,
-    DataRow,
-    DataType,
-    Describe,
-    Error,
-    Execute,
-    Flush,
-    FormatType,
-    Notice,
-    ParameterStatus,
-    Close,
-    Parse,
-    ParseComplete,
-    PasswordMessage,
-    NoData,
-    Query,
-    ReadyForQuery,
-    RowDescription,
-    StartupMessage,
-    Sync,
-)
-from .parser import ParserFeed
+from .messages import Notice, Error
 
 _convert_to_underscores_lmao = re.compile(r"(?<!^)(?=[A-Z])")
-
-
-@attr.s
-class PostgreSQLClientProtocol(Protocol):
-
-    database = attr.ib()
-    username = attr.ib()
-    _on_message = attr.ib()
-    _debug = attr.ib(default=False)
-    _encoding = attr.ib(default="utf8")
-    _parser = attr.ib()
-
-    @_parser.default
-    def _parser_build(self):
-        return ParserFeed(self._encoding)
-
-    def send(self, msg):
-        if self._debug:
-            print(">>> " + repr(msg))
-        self.transport.write(msg.ser())
-
-    def connectionMade(self):
-        s = StartupMessage(
-            parameters={"user": self.username, "database": self.database},
-            encoding=self._encoding,
-        )
-
-        self.send(s)
-
-    def dataReceived(self, data):
-        messages = self._parser.feed(data)
-
-        for i in messages:
-            if self._debug:
-                print("<<< " + repr(i))
-            self._on_message(i)
-
-    def sendQuery(self, query):
-        q = Query(self._encoding, query)
-        self.send(q)
-
-    def sendParse(self, query, name=""):
-        p = Parse(self._encoding, name, query)
-        self.send(p)
-        self.flush()
-
-    def sendDescribe(self, name=""):
-        d = Describe(self._encoding, "")
-        self.send(d)
-        self.flush()
-
-    def sendBind(self, bind):
-        b = Bind(self._encoding, "", "", bind, None)
-        self.send(b)
-        self.flush()
-
-    def flush(self):
-        f = Flush()
-        self.send(f)
-
-    def sendSync(self):
-        s = Sync()
-        self.send(s)
-
-    def sendExecute(self, portal, rows_to_return=0):
-        e = Execute(self._encoding, portal, rows_to_return)
-        self.send(e)
-        self.flush()
-
-    def sendAuth(self, password):
-        m = PasswordMessage(self._encoding, password)
-        self.send(m)
-        self.flush()
-
-    def close(self):
-        m = Close(self._encoding, "P", "")
-        self.send(m)
-        self.flush()
-
-    def sync(self):
-        m = Sync()
-        self.send(m)
-        self.flush()
-
-
-def _get_last_collector(results):
-
-    results = list(results)
-
-    for res in results:
-        if not isinstance(res, defer.Deferred):
-            results.remove(res)
-
-    r = defer.DeferredList(list(results), fireOnOneErrback=True, consumeErrors=True)
-    r.addCallback(lambda res: res[-1][-1])
-    return r
 
 
 @attr.s
@@ -167,11 +40,15 @@ class PostgresConnection(object):
 
     _machine = MethodicalMachine()
 
+    _io_impl = attr.ib()
     encoding = attr.ib(default="utf8")
     _converter = attr.ib(factory=Converter)
     _dataRows = attr.ib(factory=list, init=False, repr=False)
     _auth = attr.ib(default=None, init=False, repr=False)
     _parameters = attr.ib(factory=dict, init=False)
+
+    def _get_last_collector(self, *args, **kwargs):
+        self._io_impl._get_last_collector(*args, **kwargs)
 
     @_machine.state(initial=True)
     def DISCONNECTED(self):
@@ -216,7 +93,15 @@ class PostgresConnection(object):
         pass
 
     @_machine.state()
-    def WAITING_FOR_COMMAND_COMPLETE(self):
+    def RECEIVING_COPY_DATA(self):
+        pass
+
+    @_machine.state()
+    def REMOTE_BIND_COMPLETE(self):
+        pass
+
+    @_machine.state()
+    def COPY_OUT_COMPLETE(self):
         pass
 
     @_machine.state()
@@ -225,10 +110,6 @@ class PostgresConnection(object):
 
     @_machine.input()
     def _REMOTE_READY(self, message):
-        pass
-
-    @_machine.input()
-    def _REMOTE_PARSE_COMPLETE(self, message):
         pass
 
     @_machine.input()
@@ -271,8 +152,20 @@ class PostgresConnection(object):
     def _REMOTE_PARAMETER_STATUS(self, message):
         pass
 
+    @_machine.input()
+    def _REMOTE_COPY_OUT_RESPONSE(self, message):
+        pass
+
+    @_machine.input()
+    def _REMOTE_COPY_DATA(self, message):
+        pass
+
+    @_machine.input()
+    def _REMOTE_COPY_DONE(self, message):
+        pass
+
     def _wait_for_ready(self, *args, **kwargs):
-        self._ready_callback = defer.Deferred()
+        self._ready_callback = self._io_impl.make_callback()
         return self._ready_callback
 
     @_machine.input()
@@ -281,18 +174,11 @@ class PostgresConnection(object):
 
     @_machine.output()
     def do_connect(self, endpoint, database, username, password=None):
-        from twisted.internet.protocol import Factory
 
         if password:
             self._auth = password
 
-        self._pg = PostgreSQLClientProtocol(
-            database, username, self._onMessage, encoding=self.encoding
-        )
-
-        connected = defer.Deferred()
-        cf = Factory.forProtocol(lambda: self._pg)
-        return endpoint.connect(cf)
+        return self._io_impl.connect(endpoint, database, username)
 
     @_machine.output()
     def _wait_for_ready_on_connect(self, database, username, password):
@@ -301,7 +187,7 @@ class PostgresConnection(object):
     @_machine.output()
     def _on_connected(self, message):
         if self._ready_callback:
-            self._ready_callback.callback(message.backend_status)
+            self._io_impl.trigger_callback(self._ready_callback, message.backend_status)
 
     DISCONNECTED.upon(
         connect,
@@ -340,13 +226,9 @@ class PostgresConnection(object):
         _REMOTE_PARAMETER_STATUS, enter=WAITING_FOR_READY, outputs=[_register_parameter]
     )
 
-    WAITING_FOR_READY.upon(
-        _REMOTE_READY, enter=READY, outputs=[_on_connected]
-    )
+    WAITING_FOR_READY.upon(_REMOTE_READY, enter=READY, outputs=[_on_connected])
 
-    COMMAND_COMPLETE.upon(
-        _REMOTE_READY, enter=READY, outputs=[_on_connected]
-    )
+    COMMAND_COMPLETE.upon(_REMOTE_READY, enter=READY, outputs=[_on_connected])
 
     @_machine.input()
     def query(self, query, vals):
@@ -357,13 +239,13 @@ class PostgresConnection(object):
         self._currentQuery = query
         self._currentVals = vals
         self._dataRows = []
-        self._ready_callback = defer.Deferred()
+        self._ready_callback = self._io_impl.make_callback()
         self._pg.sendParse(query)
 
     @_machine.output()
     def _wait_for_result(self, query, vals):
-        self._result_callback = defer.Deferred()
-        self._result_callback.addCallback(lambda x: self._collate())
+        self._result_callback = self._io_impl.make_callback()
+        self._io_impl.add_callback(self._result_callback, lambda x: self._collate())
         return self._result_callback
 
     @_machine.output()
@@ -379,7 +261,7 @@ class PostgresConnection(object):
 
     def execute(self, command, args=[]):
         d = self.query(command, args)
-        d.addCallback(lambda x: None)
+        self._io_impl.add_callback(d, lambda x: None)
         return d
 
     @_machine.output()
@@ -414,30 +296,57 @@ class PostgresConnection(object):
         self._pg.sendExecute("")
 
     WAITING_FOR_BIND.upon(
-        _REMOTE_BIND_COMPLETE,
-        enter=WAITING_FOR_COMMAND_COMPLETE,
-        outputs=[_on_bind_complete],
+        _REMOTE_BIND_COMPLETE, enter=REMOTE_BIND_COMPLETE, outputs=[_on_bind_complete]
     )
 
     @_machine.output()
     def _store_row(self, message):
         self._addDataRow(message)
 
-    WAITING_FOR_COMMAND_COMPLETE.upon(
-        _REMOTE_DATA_ROW, enter=WAITING_FOR_COMMAND_COMPLETE, outputs=[_store_row]
+    REMOTE_BIND_COMPLETE.upon(
+        _REMOTE_DATA_ROW, enter=REMOTE_BIND_COMPLETE, outputs=[_store_row]
+    )
+
+    @_machine.output()
+    def _on_copy_out_response(self, message):
+        pass
+
+    REMOTE_BIND_COMPLETE.upon(
+        _REMOTE_COPY_OUT_RESPONSE,
+        enter=RECEIVING_COPY_DATA,
+        outputs=[_on_copy_out_response],
+    )
+
+    @_machine.output()
+    def _on_copy_data(self, message):
+        print(message)
+        pass
+
+    RECEIVING_COPY_DATA.upon(
+        _REMOTE_COPY_DATA, enter=RECEIVING_COPY_DATA, outputs=[_on_copy_data]
+    )
+
+    RECEIVING_COPY_DATA.upon(_REMOTE_COPY_DONE, enter=COPY_OUT_COMPLETE, outputs=[])
+
+    @_machine.output()
+    def _on_copy_out_complete(self, message):
+        pass
+
+    COPY_OUT_COMPLETE.upon(
+        _REMOTE_COMMAND_COMPLETE,
+        enter=COMMAND_COMPLETE,
+        outputs=[_on_copy_out_complete],
     )
 
     @_machine.output()
     def _on_command_complete(self, message):
         self._currentQuery = None
         self._currentVals = None
-        self._result_callback.callback(True)
+        self._io_impl.trigger_callback(self._result_callback, True)
         self._pg.sync()
 
-    WAITING_FOR_COMMAND_COMPLETE.upon(
-        _REMOTE_COMMAND_COMPLETE,
-        enter=COMMAND_COMPLETE,
-        outputs=[_on_command_complete],
+    REMOTE_BIND_COMPLETE.upon(
+        _REMOTE_COMMAND_COMPLETE, enter=COMMAND_COMPLETE, outputs=[_on_command_complete]
     )
 
     def _addDataRow(self, msg):
@@ -478,7 +387,7 @@ class PostgresConnection(object):
     @_machine.output()
     def _do_close(self):
         if not self._ready_callback:
-            self._ready_callback = defer.Deferred()
+            self._ready_callback = self._io_impl.make_callback()
         self._pg.close()
         return self._ready_callback
 
@@ -513,3 +422,19 @@ class PostgresConnection(object):
 
     def new_transaction(self):
         return Transaction(self)
+
+    @_machine.input()
+    def copy_out(self, func, table):
+        pass
+
+    @_machine.output()
+    def _do_copy_out(self, func, table):
+
+        self._copy_out_func = func
+
+        query = "COPY ? TO STDOUT"
+        vals = [table]
+
+        self._currentQuery = query
+        self._currentVals = vals
+        self._pg.sendParse(query)
