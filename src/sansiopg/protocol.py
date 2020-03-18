@@ -437,13 +437,13 @@ class PostgresConnection(object):
         self._currentQuery = query
         self._currentVals = []
         self._ready_callback = self._io_impl.make_callback()
-        self._pg.sendParse(target_query)
+        self._pg.sendQuery(target_query)
 
         return self._ready_callback
 
     READY.upon(
         copy_out,
-        enter=WAITING_FOR_PARSE,
+        enter=WAITING_FOR_COPY_OUT_RESPONSE,
         outputs=[_do_copy_out],
         collector=_get_last_collector,
     )
@@ -452,7 +452,7 @@ class PostgresConnection(object):
     def _on_copy_out_response(self, message):
         pass
 
-    EXECUTING.upon(
+    WAITING_FOR_COPY_OUT_RESPONSE.upon(
         _REMOTE_COPY_OUT_RESPONSE,
         enter=RECEIVING_COPY_DATA,
         outputs=[_on_copy_out_response],
@@ -476,5 +476,5 @@ class PostgresConnection(object):
     COPY_OUT_COMPLETE.upon(
         _REMOTE_COMMAND_COMPLETE,
         enter=COMMAND_COMPLETE,
-        outputs=[_on_copy_out_complete],
+        outputs=[],
     )
